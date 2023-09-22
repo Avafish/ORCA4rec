@@ -1,0 +1,5 @@
+dataset:Beauty users:52204 items:57289 actions/user:7.564707685234848 actions/item:6.893260486306271
+dataset:ml-1m users:6040 items:3416 actions/user:165.49850993377484 actions/item:292.6261709601874
+dataset:Steam users:334730 items:13047 actions/user:11.012374152301856 actions/item:282.53023683605426
+dataset:Video users:31013 items:23715 actions/user:9.257633895463194 actions/item:12.106557031414717
+dataset:wikipedia users:8227 items:1000 actions/user:19.141120700133705 actions/item:157.474
