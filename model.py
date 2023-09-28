@@ -5,8 +5,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.utils.data
+import torch.nn.functional as F
 from transformers import AutoModel, AutoConfig
 from otdd.pytorch.distance import DatasetDistance
+#from Otdd.pytorch.distance import DatasetDistance
 from utils import get_text, accuracy, conv_init, create_position_ids_from_inputs_embeds, embedder_init, set_grad_state, get_optimizer_scheduler, embedder_placeholder, adaptive_pooler
 
 default_timer = time.perf_counter
@@ -26,7 +28,8 @@ def otdd(feats, ys=None, src_train_dataset=None, exact=True):
                                     p = 2, inner_ot_p=2, entreg = 1e-1, ignore_target_labels = False,
                                     device=feats.device, load_prev_dyy1=None)
                 
-    d = dist.distance(maxsamples = len(src_train_dataset))
+    maxsamples = len(src_train_dataset)
+    d = dist.distance(maxsamples)
     return d
 
 class Embeddings1D(nn.Module):
@@ -55,6 +58,8 @@ class Embeddings1D(nn.Module):
             return i
         
     def forward(self, x=None, inputs_embeds=None):
+        if hasattr(torch.cuda, 'empty_cache'):
+            torch.cuda.empty_cache()
         if x is None:
             x = inputs_embeds
         x = x.float()
@@ -66,11 +71,12 @@ class Embeddings1D(nn.Module):
         return x
 
 class wrapper1D(torch.nn.Module):
-    def __init__(self, input_shape, output_shape, target_seq_len=512, train_epoch=0, drop_out=None):
+    def __init__(self, modelname, input_shape, output_shape, target_seq_len=512, train_epoch=0, drop_out=None):
         super().__init__()
+        self.modelname = modelname
         self.output_shape = output_shape
         self.target_seq_len = target_seq_len
-        modelname = 'roberta-base'
+        #modelname = 'roberta-base'
         configuration = AutoConfig.from_pretrained(modelname)
         if drop_out is not None:
             configuration.hidden_dropout_prob = drop_out
@@ -99,11 +105,12 @@ class wrapper1D(torch.nn.Module):
         return x
 
 def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader):
+    modelname = args.model_name
     src_train_loader = get_text(args.path, args.batch_size)
     src_feats, src_ys = src_train_loader.dataset.tensors[0].mean(1), src_train_loader.dataset.tensors[1]
     src_train_dataset = torch.utils.data.TensorDataset(src_feats, src_ys)
     wrapper_func = wrapper1D
-    tgt_model = wrapper_func(sample_shape, num_classes, target_seq_len=args.target_seq_len, train_epoch=args.embedder_epochs, drop_out=args.drop_out)
+    tgt_model = wrapper_func(modelname, sample_shape, num_classes, target_seq_len=args.target_seq_len, train_epoch=args.embedder_epochs, drop_out=args.drop_out)
     tgt_model = tgt_model.to(args.device).train()
     args, tgt_model, tgt_model_optimizer, tgt_model_scheduler = get_optimizer_scheduler(args, tgt_model, module='embedder')
     tgt_model_optimizer.zero_grad()
@@ -188,7 +195,7 @@ def train_one_epoch(args, model, optimizer, scheduler, loader, loss, temp, decod
         
     return train_loss / temp
 
-def evaluate(args, model, loader, loss, n_eval, topks, decoder=None, transform=None):
+def evaluate(num_classes, args, model, loader, loss, n_eval, topks, decoder=None, transform=None):
     model.eval()
     eval_loss, eval_score = 0, 0
     ys, outs, n_eval, n_data = [], [], 0, 0
@@ -225,7 +232,7 @@ def evaluate(args, model, loader, loss, n_eval, topks, decoder=None, transform=N
 
                 
                 eval_loss += loss(outs, ys).item()
-                eval_score += accuracy(outs, ys, topks).item()
+                eval_score += accuracy(num_classes, outs, ys, topks)
                 n_eval += 1
 
                 ys, outs, n_data = [], [], 0

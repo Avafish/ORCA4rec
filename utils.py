@@ -8,6 +8,7 @@ from timm.models.layers import trunc_normal_
 import copy
 import math
 import os
+import random
 import operator
 from functools import reduce, partial
 
@@ -181,7 +182,7 @@ def get_optimizer_scheduler(args, model, module=None, n_train=1):
     elif module == 'embedder':
         embedder_optimizer_params = copy.deepcopy(args.optimizer['params'])
         if embedder_optimizer_params['lr'] <= 0.001:
-            embedder_optimizer_params['lr'] *= 1000
+            embedder_optimizer_params['lr'] = 0.01
         embedder_optimizer = get_optimizer(args.optimizer['name'], embedder_optimizer_params)(get_params_to_update(model, ""))
         lr_lambda, _ = get_scheduler(args.no_warmup_scheduler['name'], args.no_warmup_scheduler['params'], args.embedder_epochs, 1)
         embedder_scheduler = torch.optim.lr_scheduler.LambdaLR(embedder_optimizer, lr_lambda=lr_lambda)
@@ -200,7 +201,7 @@ def get_optimizer_scheduler(args, model, module=None, n_train=1):
 
             predictor_optimizer_params = copy.deepcopy(args.optimizer['params'])
             if predictor_optimizer_params['lr'] <= 0.001:
-                predictor_optimizer_params['lr'] *= 1000
+                predictor_optimizer_params['lr'] = 0.01
             predictor_optimizer = get_optimizer(args.optimizer['name'], predictor_optimizer_params)(get_params_to_update(model, ""))
             lr_lambda, args.lr_sched_iter = get_scheduler(args.no_warmup_scheduler['name'], args.no_warmup_scheduler['params'], args.predictor_epochs, 1)
             predictor_scheduler = torch.optim.lr_scheduler.LambdaLR(predictor_optimizer, lr_lambda=lr_lambda)
@@ -278,7 +279,7 @@ def conv_init(m):
 
 def get_data(args):
     path = args.path
-    dataset = args.dataset
+    dataset = args.dataset + '.txt'
     maxlen = args.maxlen
     batch_size = args.batch_size
     f = open(path + dataset, 'r')
@@ -301,6 +302,13 @@ def get_data(args):
             user_valid_x.append(User[u][:-2])
             user_valid_y.append(User[u][-2])
             user_test_x.append(User[u][:-1])
+            user_test_y.append(User[u][-1])
+        else:
+            user_train_x.append(User[u])
+            user_train_y.append(User[u][-1])
+            user_valid_x.append(User[u])
+            user_valid_y.append(User[u][-1])
+            user_test_x.append(User[u])
             user_test_y.append(User[u][-1])
     for data in [user_train_x, user_valid_x, user_test_x]:
         for i,t in enumerate(data):
@@ -332,16 +340,74 @@ def get_text(path, batch_size):
     train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(train_data, train_labels), batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     return train_loader
 
-def accuracy(output, target, topk):
+def find_negs(outputs, i, t, num_classes):
+    negs, final, temp = [], [], []
+    negs.append(t.item())
+    for _ in range(100):
+        neg = np.random.randint(0, num_classes)
+        while neg in negs:
+            neg = np.random.randint(0, num_classes)
+        negs.append(neg)
+    random.shuffle(negs)
+    output = outputs[i].tolist()
+    for n in negs:
+        idx = output.index(n)
+        temp.append(idx)
+    temp.sort()
+    for tmp in temp:
+        final.append(output[tmp])
+    return final
+        
+def accuracy(num_classes, outputs, target, topk):
+    hr = 0
     maxk = max(topk)
+    outputs = outputs.topk(outputs.size(1), 1, True, True).indices # 1024,1000
+    for i, t in enumerate(target):
+        final = find_negs(outputs, i, t, num_classes)
+        if t in final[:maxk]:
+            hr += 1
     batch_size = target.size(0)
-    _, pred = output.topk(maxk, 1, True, True)
-    pred = pred.t()
-    correct = pred.eq(target.view(1, -1).expand_as(pred))
-    res = []
-    for k in topk:
-        correct_k = correct[:k].contiguous().view(-1).float().sum(0)
-        res.append(correct_k.mul_(1.0 / batch_size))
+    hr = hr / batch_size
+    return hr
 
-    res = res[0] if len(res) == 1 else res
-    return res
+def save_with_path(ep, path, args, model, optimizer, scheduler, train_score, train_losses, embedder_stats):
+    np.save(os.path.join(path, 'ep-' + str(ep) + '-hparams.npy'), args)
+    np.save(os.path.join(path, 'train_score.npy'), train_score)
+    np.save(os.path.join(path, 'train_losses.npy'), train_losses)
+    np.save(os.path.join(path, 'embedder_stats.npy'), embedder_stats)
+
+    model_state_dict = {
+                'network_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict()
+            }
+    torch.save(model_state_dict, os.path.join(path, 'state_dict.pt'))
+
+    rng_state_dict = {
+                'cpu_rng_state': torch.get_rng_state(),
+                'gpu_rng_state': torch.cuda.get_rng_state(),
+                'numpy_rng_state': np.random.get_state(),
+                'py_rng_state': random.getstate()
+            }
+    torch.save(rng_state_dict, os.path.join(path, 'rng_state.ckpt'))
+
+def save_state(args, model, optimizer, scheduler, ep, n_train, train_score, train_losses, embedder_stats):
+    path = 'results/' + args.dataset + '/maxlen' + str(args.maxlen) + "-target_seq_len" + str(args.target_seq_len) + "-embedder_epochs" + str(args.embedder_epochs)
+    if not os.path.exists(path):
+        os.makedirs(path)
+    save_with_path(ep, path, args, model, optimizer, scheduler, train_score, train_losses, embedder_stats)
+    return ep
+    
+def load_state(args, model, optimizer, scheduler, n_train, id_best, test=True):
+    path = 'results/' + args.dataset +'/maxlen' + str(args.maxlen) + "-target_seq_len" + str(args.target_seq_len) + "-embedder_epochs" + str(args.embedder_epochs)
+    if not os.path.isfile(os.path.join(path, 'state_dict.pt')):
+        return model, 0, 0, [], [], None
+    train_score = np.load(os.path.join(path, 'train_score.npy'))
+    train_losses = np.load(os.path.join(path, 'train_losses.npy'))
+    embedder_stats = np.load(os.path.join(path, 'embedder_stats.npy'))
+    epochs = len(train_score)
+    checkpoint_id = epochs - 1
+    model_state_dict = torch.load(os.path.join(path, 'state_dict.pt'))
+    model.load_state_dict(model_state_dict['network_state_dict'])
+    
+    return model, epochs, checkpoint_id, list(train_score), list(train_losses), embedder_stats
