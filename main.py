@@ -9,27 +9,28 @@ from utils import get_data, get_optimizer_scheduler, count_params, count_trainab
 from model import get_tgt_model, train_one_epoch, evaluate
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--device', default='cuda', type=str)
+parser.add_argument('--device', default='cuda:3', type=str)
 parser.add_argument('--model_name', default='roberta-base', type=str) # roberta-base gpt2
 parser.add_argument('--seed', default=0, type=int)
-parser.add_argument('--maxlen', default=512, type=int)
-parser.add_argument('--dataset', default='wikipedia')
+parser.add_argument('--maxlen', default=512, type=int) # dataset len
+parser.add_argument('--dataset', default='Beauty') # Beauty ml-1m Steam Video wikipedia
 parser.add_argument('--path', default='/data0/longzewen/LM/ORCA4rec/datasets/')
 parser.add_argument('--batch_size', default=32, type=int)
 parser.add_argument('--target_seq_len', default=512, type=int)
 parser.add_argument('--drop_out', default=0.0, type=float)
-parser.add_argument('--epochs', default=25, type=int)
-parser.add_argument('--maxsamples', default=128, type=int)
+parser.add_argument('--epochs', default=50, type=int)
+#parser.add_argument('--maxsamples', default=128, type=int)
 parser.add_argument('--predictor_epochs', default=5, type=int)
-parser.add_argument('--embedder_epochs', default=60, type=int)
+parser.add_argument('--embedder_epochs', default=50, type=int)
 parser.add_argument('--finetune_method', default='all', type=str)
-parser.add_argument('--optimizer', default={'name':'AdamW','params':{'lr':2e-5,'betas':[0.9, 0.98],'weight_decay':0.000003,'momentum':0.9}})
+parser.add_argument('--optimizer', default={'name':'AdamW','params':{'lr':1e-5,'betas':[0.9, 0.98],'weight_decay':0.000003,'momentum':0.9}})
 parser.add_argument('--scheduler', default={'name':'WarmupLR','params':{'warmup_epochs':10,'decay_epochs':25,'sched':[20, 40, 60],'base':0.2}})
 parser.add_argument('--no_warmup_scheduler', default={'name':'StepLR','params':{'warmup_epochs':10,'decay_epochs':60,'sched':[20, 40, 60],'base':0.2}})
 parser.add_argument('--accum', default=1, type=int)
 parser.add_argument('--clip', default=1, type=int)
 parser.add_argument('--validation_freq', default=1, type=int)
-parser.add_argument('--eval_batch_size', default=1024, type=int)
+parser.add_argument('--eval_batch_size', default=100, type=int)
+parser.add_argument('--use_parallel', default=True)
 args = parser.parse_args()
 
 default_timer = time.perf_counter
@@ -45,13 +46,24 @@ loss = nn.CrossEntropyLoss()
 sample_shape = (1, 1, args.maxlen)
 num_classes, train_loader, valid_loader, test_loader = get_data(args)
 n_train, n_val, n_test = len(train_loader), len(valid_loader), len(test_loader)
-model, embedder_stats = get_tgt_model(args, sample_shape, num_classes, train_loader)
+
+log_location = "/data0/longzewen/LM/ORCA4rec/log_record"
+log_fd = open(log_location, "w")
+log_fd.close()
+
+model, embedder_stats = get_tgt_model(args, sample_shape, num_classes, train_loader, log_location)
 compare_metrics = np.max
 decoder, transform = None, None
 args, model, optimizer, scheduler = get_optimizer_scheduler(args, model, module=None if args.predictor_epochs == 0 else 'predictor', n_train=n_train)
 train_full = args.predictor_epochs == 0
 if args.device == 'cuda':
     model.cuda()
+    """
+    if args.use_parallel:
+        gpu_id = "2,3,4,5"
+        gpu_id_list = gpu_id.split(',')
+        model = nn.DataParallel(model)
+    """
     try:
         loss.cuda()
     except:

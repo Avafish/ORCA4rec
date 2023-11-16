@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.init as init
 from collections import defaultdict
 from timm.models.layers import trunc_normal_
+import pandas as pd
+import csv
 import copy
 import math
 import os
@@ -277,7 +279,7 @@ def conv_init(m):
         if m.bias is not None:
             init.constant_(m.bias, 0)
 
-def get_data(args):
+def get_txt_data(args):
     path = args.path
     dataset = args.dataset + '.txt'
     maxlen = args.maxlen
@@ -329,7 +331,94 @@ def get_data(args):
     train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_train_x, user_train_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
     valid_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_valid_x, user_valid_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
     test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_test_x, user_test_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
-    return itemnum+1, train_loader, valid_loader, test_loader
+    return itemnum, train_loader, valid_loader, test_loader
+
+def split_data():
+    root_path = 'datasets/Amazon/'
+    files = ['Arts_Crafts_and_Sewing.csv', 
+         'Industrial_and_Scientific.csv', 
+         'Musical_Instruments.csv', 
+         'Office_Products.csv', 
+         'Prime_Pantry.csv']
+    alldata = []
+    for f in files:
+        path = root_path + f
+        data = [[i[1], i[0], i[3]] for i in csv.reader(open(path))]
+        alldata = alldata + data
+    alldata.sort(key=lambda x:x[-1])
+    uidict, udict, idict, ulist, ilist = {}, {}, {}, [], []
+    for row in alldata:
+        u, i, t = row
+        if u not in uidict: uidict[u] = []
+        uidict[u].append(row[1])
+    for u in list(uidict):
+        if len(uidict[u]) < 5:
+            del uidict[u]
+        else:
+            ulist.append(u)
+            for item in uidict[u]:
+                ilist.append(item)
+    ilist = set(ilist)
+    itemnum = len(ilist)
+    for x, U in enumerate(ulist):
+        udict[U] = []
+        udict[U].append(x)
+    for y, I in enumerate(ilist):
+        idict[I] = []
+        idict[I].append(y)
+    item_seq = []
+    for u in list(uidict): # item sequence only
+        items = uidict[u]
+        ids = []
+        for i in items:
+            ids.append(idict[i][0])
+        item_seq.append(ids)
+    return item_seq, itemnum
+
+
+def get_amazon_data(args):
+    #path = args.path
+    #dataset = args.dataset + '.pickle'
+    maxlen = args.maxlen
+    batch_size = args.batch_size
+    item_seqs, itemnum = split_data()
+    user_train_x, user_valid_x, user_test_x, user_train_y, user_valid_y, user_test_y = [], [], [], [], [], []
+    for seq in item_seqs:
+        user_train_x.append(seq[:-3])
+        user_train_y.append(seq[-3])
+        user_valid_x.append(seq[:-2])
+        user_valid_y.append(seq[-2])
+        user_test_x.append(seq[:-1])
+        user_test_y.append(seq[-1])
+    for data in [user_train_x, user_valid_x, user_test_x]:
+        for i,t in enumerate(data):
+            if len(t) < maxlen:
+                t.reverse()
+                while len(t) < maxlen:
+                    t.append(-1)
+                t.reverse()
+            else:
+                data[i] = t[-maxlen:]
+        data = np.array(data)
+    user_train_x = torch.from_numpy(np.expand_dims(user_train_x, 1))
+    user_valid_x = torch.from_numpy(np.expand_dims(user_valid_x, 1))
+    user_test_x = torch.from_numpy(np.expand_dims(user_test_x, 1))
+    user_train_y = torch.tensor(user_train_y)
+    user_valid_y = torch.tensor(user_valid_y)
+    user_test_y = torch.tensor(user_test_y)
+    train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_train_x, user_train_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    valid_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_valid_x, user_valid_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_test_x, user_test_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    return itemnum, train_loader, valid_loader, test_loader
+
+
+def get_data(args):
+    if args.dataset == 'Amazon':
+        itemnum, train_loader, valid_loader, test_loader = get_amazon_data(args)
+        return itemnum+1, train_loader, valid_loader, test_loader
+    else:
+        itemnum, train_loader, valid_loader, test_loader = get_txt_data(args)
+        return itemnum+1, train_loader, valid_loader, test_loader
 
 def get_text(path, batch_size):
     train_data = np.load(os.path.join(path, 'text_xs_32.npy'), allow_pickle =True)

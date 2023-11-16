@@ -7,10 +7,10 @@ import torch.nn as nn
 import torch.utils.data
 import torch.nn.functional as F
 from transformers import AutoModel, AutoConfig
-from otdd.pytorch.distance import DatasetDistance
-#from Otdd.pytorch.distance import DatasetDistance
+#from otdd.pytorch.distance import DatasetDistance
+from Otdd.pytorch.distance import DatasetDistance
 from utils import get_text, accuracy, conv_init, create_position_ids_from_inputs_embeds, embedder_init, set_grad_state, get_optimizer_scheduler, embedder_placeholder, adaptive_pooler
-
+from print_log import print_log
 default_timer = time.perf_counter
 
 def otdd(feats, ys=None, src_train_dataset=None, exact=True):
@@ -33,7 +33,7 @@ def otdd(feats, ys=None, src_train_dataset=None, exact=True):
     return d
 
 class Embeddings1D(nn.Module):
-    def __init__(self, input_shape, embed_dim, target_seq_len):
+    def __init__(self, input_shape, embed_dim, target_seq_len, log_location):
         super().__init__()
         self.embed_dim = embed_dim
         self.stack_num = self.get_stack_num(input_shape[-1], target_seq_len)
@@ -42,6 +42,7 @@ class Embeddings1D(nn.Module):
         self.padding_idx = 1
         self.position_embeddings = nn.Embedding(target_seq_len, embed_dim, padding_idx=self.padding_idx)
         self.projection = nn.Conv1d(input_shape[1], embed_dim, kernel_size=self.stack_num, stride=self.stack_num)
+        self.log_location = log_location
         conv_init(self.projection)
         
     def get_stack_num(self, input_len, target_seq_len):
@@ -64,6 +65,16 @@ class Embeddings1D(nn.Module):
             x = inputs_embeds
         x = x.float()
         x = self.projection(x).transpose(1, 2)
+        # # """
+        import subprocess
+        # Define the shell command as a string
+        command = "nvidia-smi"
+        # Execute the command and capture its output
+        output = subprocess.check_output(command, shell=True, universal_newlines=True)
+        # Print the output
+        print_log(self.log_location, output)
+        # # """
+
         x = self.norm(x)
         position_ids = create_position_ids_from_inputs_embeds(x, self.padding_idx)
         self.ps = self.position_embeddings(position_ids)
@@ -71,9 +82,10 @@ class Embeddings1D(nn.Module):
         return x
 
 class wrapper1D(torch.nn.Module):
-    def __init__(self, modelname, input_shape, output_shape, target_seq_len=512, train_epoch=0, drop_out=None):
+    def __init__(self, modelname, input_shape, output_shape, target_seq_len=512, train_epoch=0, drop_out=None, log_location = None):
         super().__init__()
         self.modelname = modelname
+        self.log_location = log_location
         self.output_shape = output_shape
         self.target_seq_len = target_seq_len
         #modelname = 'roberta-base'
@@ -82,7 +94,7 @@ class wrapper1D(torch.nn.Module):
             configuration.hidden_dropout_prob = drop_out
             configuration.attention_probs_dropout_prob = drop_out
         self.model = AutoModel.from_pretrained(modelname, config = configuration)
-        self.embedder = Embeddings1D(input_shape, embed_dim=768, target_seq_len=target_seq_len)
+        self.embedder = Embeddings1D(input_shape, embed_dim=768, target_seq_len=target_seq_len, log_location=log_location)
         embedder_init(self.model.embeddings, self.embedder, train_embedder=train_epoch > 0)
         set_grad_state(self.embedder, True)
         self.model.embeddings = embedder_placeholder()
@@ -99,18 +111,19 @@ class wrapper1D(torch.nn.Module):
         x = self.model(inputs_embeds=x)
         x = x['pooler_output']
         #x = x['last_hidden_state']
+        #x = F.softmax(x, dim=-1)
         x = self.predictor(x)
         if x.shape[1] == 1 and len(x.shape) == 2:
             x = x.squeeze(1)
         return x
 
-def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader):
+def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader, log_location):
     modelname = args.model_name
     src_train_loader = get_text(args.path, args.batch_size)
     src_feats, src_ys = src_train_loader.dataset.tensors[0].mean(1), src_train_loader.dataset.tensors[1]
     src_train_dataset = torch.utils.data.TensorDataset(src_feats, src_ys)
     wrapper_func = wrapper1D
-    tgt_model = wrapper_func(modelname, sample_shape, num_classes, target_seq_len=args.target_seq_len, train_epoch=args.embedder_epochs, drop_out=args.drop_out)
+    tgt_model = wrapper_func(modelname, sample_shape, num_classes, target_seq_len=args.target_seq_len, train_epoch=args.embedder_epochs, drop_out=args.drop_out, log_location=log_location)
     tgt_model = tgt_model.to(args.device).train()
     args, tgt_model, tgt_model_optimizer, tgt_model_scheduler = get_optimizer_scheduler(args, tgt_model, module='embedder')
     tgt_model_optimizer.zero_grad()
@@ -127,6 +140,7 @@ def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader):
             x = x.to(args.device)
             out = tgt_model(x)
             feats.append(out)
+            del out, x
             #datanum += x.shape[0]
             #if datanum > args.maxsamples: break
         feats = torch.cat(feats, 0).mean(1)
@@ -134,7 +148,7 @@ def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader):
             loss = score_func(feats)
             loss.backward()
             total_loss += loss.item()
-    
+        del feats
         time_end = default_timer()
         times.append(time_end - time_start)
         total_losses.append(total_loss)
@@ -147,8 +161,11 @@ def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader):
     torch.cuda.empty_cache()
     tgt_model.output_raw = False
     return tgt_model, embedder_stats
-
+global_index = 0
 def train_one_epoch(args, model, optimizer, scheduler, loader, loss, temp, decoder=None, transform=None):
+    global global_index
+    print(global_index)
+    global_index = global_index + 1
     model.train()            
     train_loss = 0
     optimizer.zero_grad()
@@ -192,7 +209,8 @@ def train_one_epoch(args, model, optimizer, scheduler, loader, loss, temp, decod
         
     if (not args.lr_sched_iter):
         scheduler.step()
-        
+    del x, y, z
+    torch.cuda.empty_cache()
     return train_loss / temp
 
 def evaluate(num_classes, args, model, loader, loss, n_eval, topks, decoder=None, transform=None):
