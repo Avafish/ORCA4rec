@@ -7,13 +7,14 @@ import numpy as np
 import random
 from utils import get_data, get_optimizer_scheduler, count_params, count_trainable_params, save_state, load_state
 from model import get_tgt_model, train_one_epoch, evaluate
+from torchinfo import summary
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--device', default='cuda:3', type=str)
+parser.add_argument('--device', default='cuda:1', type=str)
 parser.add_argument('--model_name', default='roberta-base', type=str) # roberta-base gpt2
 parser.add_argument('--seed', default=0, type=int)
-parser.add_argument('--maxlen', default=512, type=int) # dataset len
-parser.add_argument('--dataset', default='Beauty') # Beauty ml-1m Steam Video wikipedia
+parser.add_argument('--maxlen', default=32, type=int) # dataset len
+parser.add_argument('--dataset', default='Beauty') # Beauty ml-1m Steam Video wikipedia Amazon
 parser.add_argument('--path', default='/data0/longzewen/LM/ORCA4rec/datasets/')
 parser.add_argument('--batch_size', default=32, type=int)
 parser.add_argument('--target_seq_len', default=512, type=int)
@@ -21,7 +22,7 @@ parser.add_argument('--drop_out', default=0.0, type=float)
 parser.add_argument('--epochs', default=50, type=int)
 #parser.add_argument('--maxsamples', default=128, type=int)
 parser.add_argument('--predictor_epochs', default=5, type=int)
-parser.add_argument('--embedder_epochs', default=50, type=int)
+parser.add_argument('--embedder_epochs', default=200, type=int)
 parser.add_argument('--finetune_method', default='all', type=str)
 parser.add_argument('--optimizer', default={'name':'AdamW','params':{'lr':1e-5,'betas':[0.9, 0.98],'weight_decay':0.000003,'momentum':0.9}})
 parser.add_argument('--scheduler', default={'name':'WarmupLR','params':{'warmup_epochs':10,'decay_epochs':25,'sched':[20, 40, 60],'base':0.2}})
@@ -56,20 +57,26 @@ compare_metrics = np.max
 decoder, transform = None, None
 args, model, optimizer, scheduler = get_optimizer_scheduler(args, model, module=None if args.predictor_epochs == 0 else 'predictor', n_train=n_train)
 train_full = args.predictor_epochs == 0
-if args.device == 'cuda':
-    model.cuda()
+""" if args.use_parallel:
+    if torch.cuda.device_count() > 1:
+        num = torch.cuda.device_count()
+        device_list = list(range(num))
+        device = "cuda:0"
+        args.device = device
+        model = torch.nn.DataParallel(model,device_ids=device_list)
+        model.to(device)
+else: """
+if args.device:
+    model.to(args.device)
     """
     if args.use_parallel:
         gpu_id = "2,3,4,5"
         gpu_id_list = gpu_id.split(',')
         model = nn.DataParallel(model)
     """
-    try:
-        loss.cuda()
-    except:
-        pass
-    if decoder is not None:
-        decoder.cuda()
+    loss.to(args.device)
+if decoder is not None:
+    decoder.to(args.device)
         
 print("\n------- Experiment Summary --------")
 print("dataset:", args.dataset, "\tbatch size:", args.batch_size, "\tlr:", args.optimizer['params']['lr'])
@@ -77,6 +84,7 @@ print("num train batch:", n_train, "\tnum validation batch:", n_val, "\tnum test
 print("finetune method:", args.finetune_method)
 print("param count:", count_params(model), count_trainable_params(model))
 print(model)
+summary(model)
 
 print("\n------- Start Training --------")
 train_time, train_losses, train_score = [], [], []
