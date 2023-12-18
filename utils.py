@@ -13,6 +13,7 @@ import os
 import random
 import operator
 from functools import reduce, partial
+import time
 
 class embedder_placeholder(torch.nn.Module):
     def __init__(self):
@@ -162,6 +163,11 @@ def get_params_to_update(model, finetune_method):
 
     params_to_update = []
     name_list = ''
+    """ for name, param in model.named_parameters():
+        if 'LayerNorm' in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False """
     for name, param in model.named_parameters():
         if param.requires_grad == True:
             params_to_update.append(param)
@@ -193,24 +199,24 @@ def get_optimizer_scheduler(args, model, module=None, n_train=1):
 
     elif module == 'predictor':
 
-        try:
-            predictor = model.predictor
-            set_grad_state(model, False)
-            for n, m in model.embedder.named_parameters():
-                m.requires_grad = True
-            for n, m in model.predictor.named_parameters():
-                m.requires_grad = True
+        """ try: """
+        predictor = model.predictor
+        set_grad_state(model, False)
+        for n, m in model.embedder.named_parameters():
+            m.requires_grad = True
+        for n, m in model.predictor.named_parameters():
+            m.requires_grad = True
 
-            predictor_optimizer_params = copy.deepcopy(args.optimizer['params'])
-            if predictor_optimizer_params['lr'] <= 0.001:
-                predictor_optimizer_params['lr'] = 0.01
-            predictor_optimizer = get_optimizer(args.optimizer['name'], predictor_optimizer_params)(get_params_to_update(model, ""))
-            lr_lambda, args.lr_sched_iter = get_scheduler(args.no_warmup_scheduler['name'], args.no_warmup_scheduler['params'], args.predictor_epochs, 1)
-            predictor_scheduler = torch.optim.lr_scheduler.LambdaLR(predictor_optimizer, lr_lambda=lr_lambda)
+        predictor_optimizer_params = copy.deepcopy(args.optimizer['params'])
+        if predictor_optimizer_params['lr'] <= 0.001:
+            predictor_optimizer_params['lr'] = 0.01
+        predictor_optimizer = get_optimizer(args.optimizer['name'], predictor_optimizer_params)(get_params_to_update(model, ""))
+        lr_lambda, args.lr_sched_iter = get_scheduler(args.no_warmup_scheduler['name'], args.no_warmup_scheduler['params'], args.predictor_epochs, 1)
+        predictor_scheduler = torch.optim.lr_scheduler.LambdaLR(predictor_optimizer, lr_lambda=lr_lambda)
 
-            return args, model, predictor_optimizer, predictor_scheduler
-        except:
-            print("No predictor module.")
+        return args, model, predictor_optimizer, predictor_scheduler
+        """ except:
+            print("No predictor module.") """
 
 def set_grad_state(module, state):
     for n, m in module.named_modules():
@@ -284,6 +290,7 @@ def get_txt_data(args):
     dataset = args.dataset + '.txt'
     maxlen = args.maxlen
     batch_size = args.batch_size
+    emb_batch_size = args.emb_batch_size
     f = open(path + dataset, 'r')
     User = defaultdict(list)
     #usernum = 0
@@ -331,7 +338,8 @@ def get_txt_data(args):
     train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_train_x, user_train_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
     valid_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_valid_x, user_valid_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
     test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_test_x, user_test_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
-    return itemnum, train_loader, valid_loader, test_loader
+    emb_train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_train_x, user_train_y), batch_size=emb_batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    return itemnum, train_loader, valid_loader, test_loader, emb_train_loader
 
 def split_data():
     root_path = 'datasets/Amazon/'
@@ -380,6 +388,7 @@ def get_amazon_data(args):
     #path = args.path
     #dataset = args.dataset + '.pickle'
     maxlen = args.maxlen
+    emb_batch_size = args.emb_batch_size
     batch_size = args.batch_size
     item_seqs, itemnum = split_data()
     user_train_x, user_valid_x, user_test_x, user_train_y, user_valid_y, user_test_y = [], [], [], [], [], []
@@ -409,16 +418,17 @@ def get_amazon_data(args):
     train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_train_x, user_train_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
     valid_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_valid_x, user_valid_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
     test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_test_x, user_test_y), batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
-    return itemnum, train_loader, valid_loader, test_loader
+    emb_train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(user_train_x, user_train_y), batch_size=emb_batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    return itemnum, train_loader, valid_loader, test_loader, emb_train_loader
 
 
 def get_data(args):
     if args.dataset == 'Amazon':
-        itemnum, train_loader, valid_loader, test_loader = get_amazon_data(args)
-        return itemnum+1, train_loader, valid_loader, test_loader
+        itemnum, train_loader, valid_loader, test_loader, emb_train_loader = get_amazon_data(args)
+        return itemnum+1, train_loader, valid_loader, test_loader, emb_train_loader
     else:
-        itemnum, train_loader, valid_loader, test_loader = get_txt_data(args)
-        return itemnum+1, train_loader, valid_loader, test_loader
+        itemnum, train_loader, valid_loader, test_loader, emb_train_loader = get_txt_data(args)
+        return itemnum+1, train_loader, valid_loader, test_loader, emb_train_loader
 
 def get_text(path, batch_size):
     train_data = np.load(os.path.join(path, 'text_xs_32.npy'), allow_pickle =True)
@@ -429,7 +439,22 @@ def get_text(path, batch_size):
     train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(train_data, train_labels), batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     return train_loader
 
-def find_negs(outputs, i, t, num_classes):
+def negs(ys, num_classes):
+    final = []
+    for y in ys:
+        neg = [y.tolist()]
+        for _ in range(100):
+            n = np.random.randint(0, num_classes)
+            while n in neg:
+                n = np.random.randint(0, num_classes)
+            neg.append(n)
+        final.append(neg)
+    
+    final = torch.tensor(final)
+    return final
+        
+
+def find_negs(output, t, num_classes):
     negs, final, temp = [], [], []
     negs.append(t.item())
     for _ in range(100):
@@ -437,10 +462,8 @@ def find_negs(outputs, i, t, num_classes):
         while neg in negs:
             neg = np.random.randint(0, num_classes)
         negs.append(neg)
-    random.shuffle(negs)
-    output = outputs[i].tolist()
     for n in negs:
-        idx = output.index(n)
+        idx = torch.nonzero(output == n).item()
         temp.append(idx)
     temp.sort()
     for tmp in temp:
@@ -448,16 +471,17 @@ def find_negs(outputs, i, t, num_classes):
     return final
         
 def accuracy(num_classes, outputs, target, topk):
+    
     hr = 0
     maxk = max(topk)
-    outputs = outputs.topk(outputs.size(1), 1, True, True).indices # 1024,1000
+    outputs = outputs.topk(outputs.size(1), 1, True, True).indices # eval_batch_size, num_classes
     for i, t in enumerate(target):
-        final = find_negs(outputs, i, t, num_classes)
+        final = find_negs(outputs[i], t, num_classes)
         if t in final[:maxk]:
             hr += 1
     batch_size = target.size(0)
-    hr = hr / batch_size
-    return hr
+    #hr = hr / batch_size
+    return hr, batch_size
 
 def save_with_path(ep, path, args, model, optimizer, scheduler, train_score, train_losses, embedder_stats):
     np.save(os.path.join(path, 'ep-' + str(ep) + '-hparams.npy'), args)
@@ -500,3 +524,20 @@ def load_state(args, model, optimizer, scheduler, n_train, id_best, test=True):
     model.load_state_dict(model_state_dict['network_state_dict'])
     
     return model, epochs, checkpoint_id, list(train_score), list(train_losses), embedder_stats
+
+def cross_entropy_loss(logits):
+    logits = logits.cpu().detach().numpy()
+    numerator = np.exp(logits[0]) # pooler output和正样本的embedding内积
+    denominator = numerator + np.sum(np.exp(logits[1:])) # pooler output和负样本的embedding内积之和
+    loss = -np.log(numerator/denominator)
+    return torch.tensor(loss, requires_grad=True, dtype=torch.float64)
+
+def evl(score):
+    hr = 0
+    logits = -score
+    for logit in logits:
+        rank = logit.cpu().numpy().argsort().argsort()[0].item()
+        if rank < 10:
+            hr += 1
+    batch_size = logits.size(0)
+    return hr, batch_size

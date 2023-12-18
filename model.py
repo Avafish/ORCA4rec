@@ -8,10 +8,8 @@ import torch.nn as nn
 import torch.utils.data
 import torch.nn.functional as F
 from transformers import AutoModel, AutoConfig
-#from otdd.pytorch.distance import DatasetDistance
-from Otdd.pytorch.distance import DatasetDistance
-from utils import get_text, accuracy, conv_init, create_position_ids_from_inputs_embeds, embedder_init, set_grad_state, get_optimizer_scheduler, embedder_placeholder, adaptive_pooler
-from print_log import print_log, nvidia_smi_print
+from otdd.pytorch.distance import DatasetDistance
+from utils import evl, cross_entropy_loss, negs, find_negs, get_text, accuracy, conv_init, create_position_ids_from_inputs_embeds, embedder_init, set_grad_state, get_optimizer_scheduler, embedder_placeholder, adaptive_pooler
 default_timer = time.perf_counter
 
 def otdd(feats, ys=None, src_train_dataset=None, exact=True):
@@ -33,8 +31,8 @@ def otdd(feats, ys=None, src_train_dataset=None, exact=True):
     d = dist.distance(maxsamples)
     return d
 
-class Embeddings1D(nn.Module):
-    def __init__(self, input_shape, embed_dim, target_seq_len, log_location):
+""" class Embeddings1D(nn.Module):
+    def __init__(self, input_shape, embed_dim, target_seq_len):
         super().__init__()
         self.embed_dim = embed_dim
         self.stack_num = self.get_stack_num(input_shape[-1], target_seq_len)
@@ -43,7 +41,6 @@ class Embeddings1D(nn.Module):
         self.padding_idx = 1
         self.position_embeddings = nn.Embedding(target_seq_len, embed_dim, padding_idx=self.padding_idx)
         self.projection = nn.Conv1d(input_shape[1], embed_dim, kernel_size=self.stack_num, stride=self.stack_num)
-        self.log_location = log_location
         self.k = 0
         conv_init(self.projection)
         
@@ -65,20 +62,40 @@ class Embeddings1D(nn.Module):
             torch.cuda.empty_cache()
         if x is None:
             x = inputs_embeds
+        if x.shape[1] == 101:
+            x = x.float()
+            x = x.unsqueeze(1)
+            x = self.projection(x).transpose(1, 2)
+            x = F.softmax(x, dim=-1)
+            #x = self.norm(x)
+            return x
         x = x.float()
         x = self.projection(x).transpose(1, 2)
+        x = self.norm(x)
+        position_ids = create_position_ids_from_inputs_embeds(x, self.padding_idx)
+        self.ps = self.position_embeddings(position_ids)
+        x = x + self.ps
+        return x """
         
-        # import subprocess
-        # # Define the shell command as a string
-        # command = "nvidia-smi"
-        # # Execute the command and capture its output
-        # output = subprocess.check_output(command, shell=True, universal_newlines=True)
-        # # Print the output
-        # print_log(self.log_location, output)
+class Embeddings1D(nn.Module):
+    def __init__(self, num_labels, embed_dim=768, target_seq_len=512):
+        super().__init__()
+        self.num_labels = num_labels
+        self.embed_dim = embed_dim
+        self.embeddings = nn.Embedding(num_labels, embed_dim)
+        self.norm = nn.LayerNorm(embed_dim)
+        self.padding_idx = 1
+        self.position_embeddings = nn.Embedding(target_seq_len, embed_dim, padding_idx=self.padding_idx) 
         
-        # print_log(self.log_location, f"{torch.cuda.memory_allocated()}")
-        # print_log(self.log_location, f"{torch.cuda.memory_reserved()}")
-
+    def forward(self, x=None, inputs_embeds=None):
+        if x is None:
+            x = inputs_embeds
+        if x.shape[1] == 101:
+            x = self.embeddings(x).squeeze(1)
+            #x = F.softmax(x, dim=-1)
+            x = self.norm(x)
+            return x
+        x = self.embeddings(x).squeeze(1)
         x = self.norm(x)
         position_ids = create_position_ids_from_inputs_embeds(x, self.padding_idx)
         self.ps = self.position_embeddings(position_ids)
@@ -86,10 +103,10 @@ class Embeddings1D(nn.Module):
         return x
 
 class wrapper1D(torch.nn.Module):
-    def __init__(self, modelname, input_shape, output_shape, target_seq_len=512, train_epoch=0, drop_out=None, log_location = None):
+    def __init__(self, args, modelname, input_shape, output_shape, target_seq_len=512, train_epoch=0, drop_out=None):
         super().__init__()
+        self.args = args
         self.modelname = modelname
-        self.log_location = log_location
         self.output_shape = output_shape
         self.target_seq_len = target_seq_len
         #modelname = 'roberta-base'
@@ -98,7 +115,8 @@ class wrapper1D(torch.nn.Module):
             configuration.hidden_dropout_prob = drop_out
             configuration.attention_probs_dropout_prob = drop_out
         self.model = AutoModel.from_pretrained(modelname, config = configuration)
-        self.embedder = Embeddings1D(input_shape, embed_dim=768, target_seq_len=target_seq_len, log_location=log_location)
+        #self.embedder = Embeddings1D(input_shape, embed_dim=768, target_seq_len=target_seq_len)
+        self.embedder = Embeddings1D(output_shape, embed_dim=768, target_seq_len=target_seq_len)
         embedder_init(self.model.embeddings, self.embedder, train_embedder=train_epoch > 0)
         set_grad_state(self.embedder, True)
         self.model.embeddings = embedder_placeholder()
@@ -109,24 +127,23 @@ class wrapper1D(torch.nn.Module):
         self.output_raw = True
         
     def forward(self, x):
-        if self.output_raw:
-            # print("11111")
+        if self.output_raw | (x.shape[1]==101):
             return self.embedder(x)
         x = self.embedder(x)
         x = self.model(inputs_embeds=x)
-        x = x['pooler_output']
-        #x = x['last_hidden_state']
+        #y = x['last_hidden_state'] # batch_size, maxlen, 768
+        x = x['pooler_output'] # batch_size, 768
         #x = F.softmax(x, dim=-1)
-        x = self.predictor(x)
+        if self.args.use_predictor:
+            x = self.predictor(x)
         if x.shape[1] == 1 and len(x.shape) == 2:
             x = x.squeeze(1)
         return x
 
-def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader, log_location):
+def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader):
     if args.use_parallel:
         if torch.cuda.device_count() > 1:
-            num = torch.cuda.device_count()
-            device_list = list(range(num))
+            device_list = [0]
             device = "cuda:0"
             args.device = device
     modelname = args.model_name
@@ -134,8 +151,9 @@ def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader, log_locatio
     src_feats, src_ys = src_train_loader.dataset.tensors[0].mean(1), src_train_loader.dataset.tensors[1]
     src_train_dataset = torch.utils.data.TensorDataset(src_feats, src_ys)
     wrapper_func = wrapper1D
-    tgt_model = wrapper_func(modelname, sample_shape, num_classes, target_seq_len=args.target_seq_len, train_epoch=args.embedder_epochs, drop_out=args.drop_out, log_location=log_location)
-    tgt_model = torch.nn.DataParallel(tgt_model,device_ids=device_list)
+    tgt_model = wrapper_func(args, modelname, sample_shape, num_classes, target_seq_len=args.target_seq_len, train_epoch=args.embedder_epochs, drop_out=args.drop_out)
+    if args.use_parallel:
+        tgt_model = torch.nn.DataParallel(tgt_model,device_ids=device_list)
     tgt_model = tgt_model.to(args.device).train()
     args, tgt_model, tgt_model_optimizer, tgt_model_scheduler = get_optimizer_scheduler(args, tgt_model, module='embedder')
     tgt_model_optimizer.zero_grad()
@@ -146,11 +164,6 @@ def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader, log_locatio
         total_loss = 0
         time_start = default_timer()
         Loss = []
-        #_feats = []
-        # _feats_tensor = 
-        # torch.zeros([32, 512, 768], dtype = torch.float32).to(args.device)
-        # _
-        #datanum = 0
         for i, data in enumerate(tgt_train_loader):
             x, y = data
             x = x.to(args.device)
@@ -158,20 +171,6 @@ def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader, log_locatio
             out_mean = out.mean(1).cpu()
             loss = score_func(out_mean)
             Loss.append(loss)
-
-            #_feats.append(out_mean)
-            #datanum += x.shape[0]
-            #if datanum > args.maxsamples: break
-            #del x, out, out_mean
-            #torch.cuda.empty_cache()
-            # nvidia_smi_print(log_location)
-        # nvidia_smi_print(log_location)
-        #feats = torch.cat(_feats, 0).to(args.device)
-        #del _feats
-        """ nvidia_smi_print(log_location)
-        import sys
-        sys.exit()
-        torch.cuda.empty_cache() """
         
         """ if feats.shape[0] > 1:
             loss = score_func(feats)
@@ -192,7 +191,7 @@ def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader, log_locatio
     tgt_model.output_raw = False
     return tgt_model, embedder_stats
 
-def train_one_epoch(args, model, optimizer, scheduler, loader, loss, temp, decoder=None, transform=None):
+def train_one_epoch(num_classes, args, model, optimizer, scheduler, loader, loss, temp, decoder=None, transform=None):
 
     model.train()            
     train_loss = 0
@@ -204,10 +203,24 @@ def train_one_epoch(args, model, optimizer, scheduler, loader, loss, temp, decod
             z = z.to(args.device)
         else:
             x, y = data
-        x, y = x.to(args.device), y.to(args.device)
-        out = model(x)
+        if args.use_predictor:
+            x, y = x.to(args.device), y.to(args.device)
+            out = model(x)
+            batch_loss = loss(out, y)
+        else:
+            ys = negs(y, num_classes) # batch_size, 101
+            x, y, ys = x.to(args.device), y.to(args.device), ys.to(args.device)
+            ys_out = model(ys).transpose(1, 2) # batch_size, 768, 101
+            out = model(x).unsqueeze(1) # batch_size, (1, 768) | num_labels
+            
+            batch_loss = 0
+            logits = torch.matmul(out, ys_out).squeeze(1)
+            for i in range(0, logits.shape[0]):
+                #logits = out[0].matmul(ys_out[0]).squeeze(0)
+                l = cross_entropy_loss(logits[i])
+                batch_loss += l
         
-        if isinstance(out, dict):
+        """ if isinstance(out, dict):
             out = out['out']
         
         if decoder is not None:
@@ -216,10 +229,9 @@ def train_one_epoch(args, model, optimizer, scheduler, loader, loss, temp, decod
             
         if transform is not None:
             out = transform(out, z)
-            y = transform(y, z)
+            y = transform(y, z) """
             
-        l = loss(out, y)
-        l.backward()
+        batch_loss.backward()
         
         if args.clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
@@ -231,7 +243,7 @@ def train_one_epoch(args, model, optimizer, scheduler, loader, loss, temp, decod
         if args.lr_sched_iter:
             scheduler.step()
             
-        train_loss += l.item()
+        train_loss += batch_loss.item()
         if i >= temp - 1:
             break
         
@@ -242,8 +254,9 @@ def train_one_epoch(args, model, optimizer, scheduler, loader, loss, temp, decod
 
 def evaluate(num_classes, args, model, loader, loss, n_eval, topks, decoder=None, transform=None):
     model.eval()
-    eval_loss, eval_score = 0, 0
-    ys, outs, n_eval, n_data = [], [], 0, 0
+    hr, num_eval = 0, 0
+    eval_loss, eval_score, n_eval, n_data = 0, 0, 0, 0
+    ys, outs, ys_outs = [], [], []
     with torch.no_grad():
         for i, data in enumerate(loader):
             if transform is not None:
@@ -252,11 +265,18 @@ def evaluate(num_classes, args, model, loader, loss, n_eval, topks, decoder=None
             else:
                 x, y = data
                                 
-            x, y = x.to(args.device), y.to(args.device)
+            if args.use_predictor:
+                x, y = x.to(args.device), y.to(args.device)
+                out = model(x)
+            else:
+                nys = negs(y, num_classes)
+                x, y, nys = x.to(args.device), y.to(args.device), nys.to(args.device)
 
-            out = model(x)
+                ys_out = model(nys).transpose(1, 2) # batch_size, 768, 101
+                out = model(x).unsqueeze(1) # batch_size, (1, 768) | num_labels
+                ys_outs.append(ys_out)
             
-            if isinstance(out, dict):
+            """ if isinstance(out, dict):
                 out = out['out']
                 
             if decoder is not None:
@@ -265,24 +285,46 @@ def evaluate(num_classes, args, model, loader, loss, n_eval, topks, decoder=None
                                 
             if transform is not None:
                 out = transform(out, z)
-                y = transform(y, z)
+                y = transform(y, z) """
                 
             outs.append(out)
             ys.append(y)
             n_data += x.shape[0]
             
             if n_data >= args.eval_batch_size or i == len(loader) - 1:
+                #default_timer = time.perf_counter
+                #time_start = default_timer()
                 outs = torch.cat(outs, 0)
                 ys = torch.cat(ys, 0)
+                if ys_outs:
+                    ys_outs = torch.cat(ys_outs, 0)
 
-                
-                eval_loss += loss(outs, ys).item()
-                eval_score += accuracy(num_classes, outs, ys, topks)
-                n_eval += 1
+                if args.use_predictor:
+                    eval_loss += loss(outs, ys).item()
+                    eval_score, eval_size = accuracy(num_classes, outs, ys, topks)
+                    hr += eval_score
+                    num_eval += eval_size
+                    n_eval += 1
+                else:
+                    logits = torch.matmul(outs, ys_outs).squeeze(1)
+                    batch_loss = 0
+                    for k in range(0, logits.size(0)):
+                        l = cross_entropy_loss(logits[k])
+                        batch_loss += l
+                    eval_loss += batch_loss.item()
+                    #eval_loss += loss(outs, ys).item()
+                    #eval_score += accuracy(num_classes, outs, ys, topks)
+                    eval_score, eval_size = evl(logits) # hr , batch_size
+                    hr += eval_score
+                    num_eval += eval_size
+                    n_eval += 1
 
-                ys, outs, n_data = [], [], 0
+                #ti = default_timer() - time_start
+                #print(ti)
+                ys, outs, ys_outs, n_data = [], [], [], 0
 
         eval_loss /= n_eval
-        eval_score /= n_eval
+        #eval_score /= n_eval
+        eval_score = hr / num_eval
         
-    return eval_loss, eval_score
+    return eval_loss, eval_score   
