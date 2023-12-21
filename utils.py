@@ -324,7 +324,7 @@ def get_txt_data(args):
             if len(t) < maxlen:
                 t.reverse()
                 while len(t) < maxlen:
-                    t.append(-1)
+                    t.append(0)
                 t.reverse()
             else:
                 data[i] = t[-maxlen:]
@@ -404,7 +404,7 @@ def get_amazon_data(args):
             if len(t) < maxlen:
                 t.reverse()
                 while len(t) < maxlen:
-                    t.append(-1)
+                    t.append(0)
                 t.reverse()
             else:
                 data[i] = t[-maxlen:]
@@ -431,19 +431,19 @@ def get_data(args):
         return itemnum+1, train_loader, valid_loader, test_loader, emb_train_loader
 
 def get_text(path, batch_size):
-    train_data = np.load(os.path.join(path, 'text_xs_32.npy'), allow_pickle =True)
-    train_labels = np.load(os.path.join(path, 'text_ys_32.npy'), allow_pickle =True)
+    train_data = np.load(os.path.join(path, 'text_xs.npy'), allow_pickle =True)
+    train_labels = np.load(os.path.join(path, 'text_ys.npy'), allow_pickle =True)
     maxsize = len(train_data)
     train_data = torch.from_numpy(train_data[:maxsize]).float()#.mean(1)
     train_labels = torch.from_numpy(train_labels[:maxsize]).long()
     train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(train_data, train_labels), batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     return train_loader
 
-def negs(ys, num_classes):
+def negs(ys, num_classes, num_negs):
     final = []
     for y in ys:
         neg = [y.tolist()]
-        for _ in range(100):
+        for _ in range(num_negs):
             n = np.random.randint(0, num_classes)
             while n in neg:
                 n = np.random.randint(0, num_classes)
@@ -529,15 +529,30 @@ def cross_entropy_loss(logits):
     logits = logits.cpu().detach().numpy()
     numerator = np.exp(logits[0]) # pooler output和正样本的embedding内积
     denominator = numerator + np.sum(np.exp(logits[1:])) # pooler output和负样本的embedding内积之和
-    loss = -np.log(numerator/denominator)
+    loss = -np.log(100*numerator/denominator)
     return torch.tensor(loss, requires_grad=True, dtype=torch.float64)
 
 def evl(score):
     hr = 0
+    ndcg = 0
     logits = -score
     for logit in logits:
         rank = logit.cpu().numpy().argsort().argsort()[0].item()
         if rank < 10:
             hr += 1
+            ndcg += math.log(2) / math.log(rank+2)
     batch_size = logits.size(0)
-    return hr, batch_size
+    return hr, ndcg, batch_size
+
+def find_p_n(x, y, num_classes):
+    x = x.squeeze(1)
+    len = x.shape[-1]
+    neg = torch.zeros((x.shape[0], x.shape[-1]), dtype=torch.int32)
+    for i,X in enumerate(x):
+        for j,_  in enumerate(X):
+            if X[j]!= 0:
+                neg[i][j] = random.randint(1, num_classes)
+                X[j] = X[(j+1)%len]
+        x[i][len-1] = y[i].item()
+        
+    return x, neg
