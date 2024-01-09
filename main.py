@@ -10,29 +10,30 @@ from model import get_tgt_model, train_one_epoch, evaluate
 from torchinfo import summary
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--device', default='cuda:2', type=str)
+parser.add_argument('--device', default='cuda:1', type=str)
 parser.add_argument('--model_name', default='roberta-base', type=str) # roberta-base gpt2
 parser.add_argument('--seed', default=0, type=int)
 parser.add_argument('--maxlen', default=50, type=int) # dataset len
-parser.add_argument('--dataset', default='Beauty') # Beauty ml-1m Steam Video wikipedia Amazon_data
+parser.add_argument('--dataset', default='Beauty') # Beauty1e-3 ml-1m Steam Video wikipedia1e-5 Amazon_data s3b
 parser.add_argument('--path', default='datasets/')
-parser.add_argument('--emb_batch_size', default=2048, type=int)
-parser.add_argument('--batch_size', default=200, type=int)
+parser.add_argument('--emb_batch_size', default=2000, type=int)
+parser.add_argument('--batch_size', default=500, type=int)
 parser.add_argument('--target_seq_len', default=512, type=int)
 parser.add_argument('--drop_out', default=0.0, type=float)
-parser.add_argument('--epochs', default=50, type=int)
+parser.add_argument('--epochs', default=30, type=int)
 parser.add_argument('--predictor_epochs', default=0, type=int)
-parser.add_argument('--embedder_epochs', default=0, type=int)
-parser.add_argument('--finetune_method', default='all', type=str) # layernorm
-parser.add_argument('--optimizer', default={'name':'AdamW','params':{'lr':1e-5,'betas':[0.9, 0.98],'weight_decay':0.000003,'momentum':0.9}})
-parser.add_argument('--scheduler', default={'name':'WarmupLR','params':{'warmup_epochs':10,'decay_epochs':25,'sched':[20, 40, 60],'base':0.2}})
+parser.add_argument('--embedder_epochs', default=60, type=int)
+parser.add_argument('--finetune_method', default='all', type=str) # all layernorm
+parser.add_argument('--optimizer', default={'name':'AdamW','params':{'lr':1e-3,'betas':[0.9, 0.98],'weight_decay':0.000003,'momentum':0.9}})
+parser.add_argument('--scheduler', default={'name':'WarmupLR','params':{'warmup_epochs':10,'decay_epochs':60,'sched':[20, 40, 60],'base':0.2}})
 parser.add_argument('--no_warmup_scheduler', default={'name':'StepLR','params':{'warmup_epochs':10,'decay_epochs':60,'sched':[20, 40, 60],'base':0.2}})
 parser.add_argument('--accum', default=1, type=int)
 parser.add_argument('--clip', default=1, type=int)
 parser.add_argument('--validation_freq', default=1, type=int)
-parser.add_argument('--eval_batch_size', default=100, type=int)
 parser.add_argument('--use_parallel', default=False)
 parser.add_argument('--use_predictor', default=False)
+parser.add_argument('--lr_sched_iter', default=False)
+parser.add_argument('--neg_samples', default='100') # all
 args = parser.parse_args()
 
 default_timer = time.perf_counter

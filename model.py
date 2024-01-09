@@ -91,9 +91,8 @@ class Embeddings1D(nn.Module):
     def forward(self, x=None, inputs_embeds=None, emb_only=False):
         if x is None:
             x = inputs_embeds
-        if (x.shape[1] == 101) | emb_only:
+        if emb_only:
             x = self.embeddings(x)
-            #x = F.softmax(x, dim=-1)
             x = self.norm(x)
             return x
         x = x.squeeze(1)
@@ -118,24 +117,26 @@ class wrapper1D(torch.nn.Module):
             configuration.attention_probs_dropout_prob = drop_out
         self.model = AutoModel.from_pretrained(modelname, config = configuration)
         #self.embedder = Embeddings1D(input_shape, embed_dim=768, target_seq_len=target_seq_len)
-        self.embedder = Embeddings1D(output_shape, embed_dim=768, target_seq_len=target_seq_len)
-        embedder_init(self.model.embeddings, self.embedder, train_embedder=train_epoch > 0)
+        if args.model_name == 'gpt2':
+            self.embedder = Embeddings1D(output_shape, embed_dim=configuration.n_embd, target_seq_len=target_seq_len)
+        else:
+            self.embedder = Embeddings1D(output_shape, embed_dim=configuration.hidden_size, target_seq_len=target_seq_len)
+        #embedder_init(self.model.embeddings, self.embedder, train_embedder=train_epoch > 0)
         set_grad_state(self.embedder, True)
-        self.model.embeddings = embedder_placeholder()
-        self.model.pooler = adaptive_pooler()
+        #self.model.embeddings = embedder_placeholder()
+        #self.model.pooler = adaptive_pooler()
         self.predictor = nn.Linear(in_features=768, out_features=output_shape)
         set_grad_state(self.model, False)
         set_grad_state(self.predictor, False)
         self.output_raw = True
         
     def forward(self, x):
-        if self.output_raw | (x.shape[1]==101):
+        if self.output_raw:
             return self.embedder(x)
         x = self.embedder(x)
         x = self.model(inputs_embeds=x)
         x = x['last_hidden_state'] # batch_size, maxlen, 768
         #x = x['pooler_output'] # batch_size, 768
-        #x = F.softmax(x, dim=-1)
         if self.args.use_predictor:
             x = self.predictor(x)
         if x.shape[1] == 1 and len(x.shape) == 2:
@@ -165,20 +166,27 @@ def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader):
     for ep in range(args.embedder_epochs):
         total_loss = 0
         time_start = default_timer()
-        Loss = []
+        #Loss = []
+        flag = 0
+        Loss = torch.zeros((1)).to(args.device)
         for i, data in enumerate(tgt_train_loader):
             x, y = data
             x = x.to(args.device)
             out = tgt_model(x)
-            out_mean = out.mean(1).cpu() # bs, 768
+            out_mean = out.mean(1) # bs, 768
             loss = score_func(out_mean)
-            Loss.append(loss)
+            #Loss.append(loss)
+            Loss = Loss + loss
+            flag = i + 1 
+            del x, y, out, out_mean, loss
+            torch.cuda.empty_cache()
         
         """ if feats.shape[0] > 1:
             loss = score_func(feats)
             loss.backward()
             total_loss += loss.item() """
-        final_loss = torch.stack(Loss, 0).mean(0)
+        #final_loss = torch.stack(Loss, 0).mean(0)
+        final_loss = Loss / flag
         final_loss.backward()
         total_loss += final_loss.item()
         time_end = default_timer()
@@ -189,7 +197,7 @@ def get_tgt_model(args, sample_shape, num_classes, tgt_train_loader):
         tgt_model_optimizer.step()
         tgt_model_scheduler.step()
         tgt_model_optimizer.zero_grad()
-    torch.cuda.empty_cache()
+    #torch.cuda.empty_cache()
     tgt_model.output_raw = False
     return tgt_model, embedder_stats
 
@@ -222,6 +230,19 @@ def train_one_epoch(num_classes, args, model, optimizer, scheduler, loader, loss
             batch_loss += bce_criterion(pos_logits[indices], pos_labels[indices])
             batch_loss += bce_criterion(neg_logits[indices], neg_labels[indices])
         
+        
+        """ if isinstance(out, dict):
+            out = out['out']
+        
+        if decoder is not None:
+            out = decoder.decode(out).view(x.shape[0], -1)
+            y = decoder.decode(y).view(x.shape[0], -1)
+            
+        if transform is not None:
+            out = transform(out, z)
+            y = transform(y, z) """
+            
+            
         """ if isinstance(out, dict):
             out = out['out']
         
@@ -258,7 +279,7 @@ def evaluate(num_classes, args, model, loader, loss, n_eval, topks, decoder=None
     model.eval()
     hr, ndcg, num_eval = 0, 0, 0
     eval_score, eval_loss, eval_hr, eval_ndcg, n_eval, n_data = 0, 0, 0, 0, 0, 0
-    ys, outs, ys_outs = [], [], []
+    #ys, outs, ys_outs = [], [], []
     with torch.no_grad():
         for i, data in enumerate(loader):
             
@@ -268,56 +289,58 @@ def evaluate(num_classes, args, model, loader, loss, n_eval, topks, decoder=None
                 x, y = x.to(args.device), y.to(args.device)
                 out = model(x)
             else:
-                nys = negs(y, num_classes, 100)
+                nys = negs(y, num_classes, args.neg_samples)
                 x, y, nys = x.to(args.device), y.to(args.device), nys.to(args.device)
 
-                ys_out = model(nys).transpose(1, 2) # batch_size, 768, 101
-                out = model(x)[:, -1, :].unsqueeze(1) # batch_size, (1, 768) | num_labels
-                ys_outs.append(ys_out)
+                ys_out = model.embedder(nys, emb_only=True).transpose(-1, -2) # batch_size, 768, 101
+                out = model(x)[:, 0, :] # batch_size, (1, 768) | num_labels
+                #out = model(x).mean(dim=1).unsqueeze(1)
+                #ys_outs.append(ys_out)
             
-            """ if isinstance(out, dict):
-                out = out['out']
                 
-            if decoder is not None:
-                out = decoder.decode(out).view(x.shape[0], -1)
-                y = decoder.decode(y).view(x.shape[0], -1)
-                                
-            if transform is not None:
-                out = transform(out, z)
-                y = transform(y, z) """
-                
-            outs.append(out)
-            ys.append(y)
-            n_data += x.shape[0]
+            #outs.append(out)
+            #ys.append(y)
+            #n_data += x.shape[0]
             
-            if n_data >= args.eval_batch_size or i == len(loader) - 1:
+            """ if n_data >= args.eval_batch_size or i == len(loader) - 1:
                 #default_timer = time.perf_counter
                 #time_start = default_timer()
                 outs = torch.cat(outs, 0)
                 ys = torch.cat(ys, 0)
                 if ys_outs:
-                    ys_outs = torch.cat(ys_outs, 0)
+                    ys_outs = torch.cat(ys_outs, 0) """
 
-                if args.use_predictor:
-                    eval_loss += loss(outs, ys).item()
-                    eval_score, eval_size = accuracy(num_classes, outs, ys, topks)
-                    hr += eval_score
-                    num_eval += eval_size
-                    n_eval += 1
+            if args.use_predictor:
+                eval_loss += loss(out, y).item()
+                eval_score, eval_size = accuracy(num_classes, out, y, topks)
+                hr += eval_score
+                num_eval += eval_size
+                n_eval += 1
+            else:
+                if args.neg_samples == 'all':
+                    logits = torch.matmul(out, ys_out)
                 else:
-                    logits = torch.matmul(outs, ys_outs).squeeze(1)
-                    logits = F.softmax(logits, dim=-1)
-                    #eval_loss += loss(outs, ys).item()
-                    #eval_score += accuracy(num_classes, outs, ys, topks)
-                    eval_hr, eval_ndcg, eval_size = evl(logits) # hr , batch_size
-                    hr += eval_hr
-                    ndcg += eval_ndcg
-                    num_eval += eval_size
-                    n_eval += 1
+                    out = out.unsqueeze(1)
+                    logits = torch.matmul(out, ys_out).squeeze(1)
+                    
+                #eval_loss += loss(outs, ys).item()
+                #eval_score += accuracy(num_classes, outs, ys, topks)
+                
+                """ norm1 = torch.norm(out, dim=2, keepdim=True) #200, 1, 1
+                norm2 = torch.norm(ys_out.transpose(1,2), dim=2, keepdim=True).transpose(1,2)
+                norm = norm1*norm2
+                logits = (torch.matmul(out, ys_out) / norm).squeeze(1) """
+                
+                #logits = F.softmax(logits, dim=-1)
+                eval_hr, eval_ndcg, eval_size = evl(logits, topks) # hr , batch_size
+                hr += eval_hr
+                ndcg += eval_ndcg
+                num_eval += eval_size
+                n_eval += 1
 
                 #ti = default_timer() - time_start
                 #print(ti)
-                ys, outs, ys_outs, n_data = [], [], [], 0
+                #ys, outs, ys_outs, n_data = [], [], [], 0
 
         eval_loss = 0
         eval_loss /= n_eval

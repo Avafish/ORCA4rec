@@ -299,7 +299,7 @@ def get_txt_data(args):
     for line in f:
         u, i = line.rstrip().split(' ')
         u = int(u)
-        i = int(i)-1
+        i = int(i)
         #usernum = max(u, usernum)
         itemnum = max(i, itemnum)
         User[u].append(i)
@@ -425,10 +425,10 @@ def get_amazon_data(args):
 def get_data(args):
     if args.dataset == 'Amazon':
         itemnum, train_loader, valid_loader, test_loader, emb_train_loader = get_amazon_data(args)
-        return itemnum+1, train_loader, valid_loader, test_loader, emb_train_loader
+        return itemnum, train_loader, valid_loader, test_loader, emb_train_loader
     else:
         itemnum, train_loader, valid_loader, test_loader, emb_train_loader = get_txt_data(args)
-        return itemnum+1, train_loader, valid_loader, test_loader, emb_train_loader
+        return itemnum, train_loader, valid_loader, test_loader, emb_train_loader
 
 def get_text(path, batch_size):
     train_data = np.load(os.path.join(path, 'text_xs.npy'), allow_pickle =True)
@@ -440,15 +440,18 @@ def get_text(path, batch_size):
     return train_loader
 
 def negs(ys, num_classes, num_negs):
-    final = []
-    for y in ys:
-        neg = [y.tolist()]
-        for _ in range(num_negs):
-            n = np.random.randint(0, num_classes)
-            while n in neg:
+    if num_negs == 'all':
+        final = list(range(1, num_classes+1))
+    else:
+        final = []
+        for y in ys:
+            neg = [y.tolist()]
+            for _ in range(int(num_negs)):
                 n = np.random.randint(0, num_classes)
-            neg.append(n)
-        final.append(neg)
+                while n in neg:
+                    n = np.random.randint(0, num_classes)
+                neg.append(n)
+            final.append(neg)
     
     final = torch.tensor(final)
     return final
@@ -532,19 +535,20 @@ def cross_entropy_loss(logits):
     loss = -np.log(100*numerator/denominator)
     return torch.tensor(loss, requires_grad=True, dtype=torch.float64)
 
-def evl(score):
+def evl(score, topks):
     hr = 0
     ndcg = 0
     logits = -score
     for logit in logits:
         rank = logit.cpu().numpy().argsort().argsort()[0].item()
-        if rank < 10:
+        if rank < topks[0]:
             hr += 1
             ndcg += math.log(2) / math.log(rank+2)
     batch_size = logits.size(0)
     return hr, ndcg, batch_size
 
-def find_p_n(x, y, num_classes):
+def find_p_n(data, y, num_classes):
+    x = data.clone()
     x = x.squeeze(1)
     len = x.shape[-1]
     neg = torch.zeros((x.shape[0], x.shape[-1]), dtype=torch.int32)
